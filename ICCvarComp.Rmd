@@ -1,0 +1,331 @@
+---
+title: "Pressure pain algometry reliability using the variance components approach"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  html_notebook: default
+---
+
+# Load packages
+
+```{r message=FALSE, warning=FALSE}
+# Helper
+library(tidyverse)
+library(boot)
+library(parallel)
+library(foreach)
+# Stats
+library(lme4)
+library(psych)
+library (hemp)
+# Markdown
+library(knitr)
+#Plots
+library (cowplot)
+```
+
+# Read in data
+
+```{r message=FALSE, warning=FALSE}
+DaveData <- read_delim("DaveData.txt", "\t",
+                       escape_double = FALSE, trim_ws = TRUE)
+```
+
+# Convert data to long format
+
+```{r}
+ppt.df = DaveData %>%
+  na.omit() %>%
+  gather (key = Var, value = PPT, c(-c(1:4))) %>%
+  separate(Var, c("side_session", "reps"), sep = "_") %>%
+  mutate (side = str_remove (side_session, "[0-9]+"),
+          session = str_remove(side_session, "L|R")) %>%
+  mutate (reps = as.numeric(reps))  %>%
+  select (subj, side, session, reps, PPT) %>%
+  mutate (subj = factor (subj),
+          side = factor (side),
+          session  = factor (session))
+```
+
+# Plotting 
+
+```{r}
+
+tiff("../Manuscript/Plot2.tiff", width = 4, height = 4, units = 'in', res = 300, compression = 'none')
+
+ppt.df %>% 
+  mutate (session = recode (session,
+                            "1" = "session 1",
+                            "2" = "session 2"),
+          side = recode (side,
+                         "L" = "Left",
+                         "R" = "Right")) %>%
+  group_by (side, 
+           session, 
+           reps) %>%
+  summarize (Mean = mean (PPT),
+             Sd = sd (PPT)) %>%
+  ungroup() %>%
+  ggplot (aes (x = reps, y = Mean)) +
+  geom_point() +
+  geom_line() +
+  geom_errorbar(aes(ymin =Mean - Sd,  ymax=Mean+Sd)) +
+  facet_wrap (side~session, nrow =2) +
+  ylab ("PPT (N)") +
+  xlab ("Repetitions") +
+  scale_x_continuous(breaks=seq(2,10,2)) +
+  theme_cowplot()
+
+dev.off ()
+```
+
+# Method: Variance components approach
+
+## All factors crossed
+
+Some evidence this model is too complex.
+
+```{r}
+f1 = PPT ~ (1|subj) + (1|session) + (1|side) + (1|reps) +
+  (1|subj:session) + (1|subj:side) + (1|subj:reps) + (1|session:side) + (1|session:reps) + (1|side:reps) + 
+  (1|subj:session:side) + (1|subj:session:reps) + (1|subj:side:reps) + (1|session:side:reps) 
+
+m1 = lmer (f1, data = ppt.df)
+
+varcomp1 = as.data.frame (VarCorr(m1))
+varcomp1[,c(4,5)] <- round (varcomp1[,c(4,5)], 2)
+varcomp1
+```
+
+## Gstudy
+
+```{r}
+g1 <- hemp::gstudy(m1)
+g1
+```
+
+
+## Merge side and session to become separate trials
+
+```{r}
+
+ppt.df.merge <- ppt.df %>%
+  unite ("trials", session, side, sep =  "_")
+
+f2 = PPT ~ (1|subj) + (1|trials) + (1|reps) + (1|subj:reps) + (1|trials:reps) + (1|subj:trials)
+m2 = lmer (f2, data = ppt.df.merge, REML = TRUE)
+
+varcomp2 = as.data.frame (VarCorr(m2))
+varcomp2[,c(4,5)] <- round (varcomp2[,c(4,5)], 2)
+varcomp2
+
+```
+
+## Gstudy
+
+```{r}
+g2 <- hemp::gstudy(m2)
+g2
+
+```
+
+## Get ICC from variance components with bootstrap to get confidence interval
+
+https://github.com/kohleth/kohleth.info/blob/master/content/post/2017-10-09-all-the-different-iccs.Rmd
+
+### Create custom ICC function
+
+`what` is what ICC does one want to calculate for? Example: `what` = `"reps"` calculates ICC(reps).
+
+`k` is the number of repeated measurements for ICCk. 
+
+```{r}
+icc_type = function (what, k) {
+  
+  function (m) {
+    
+    v=as.data.frame(VarCorr(m))
+    vc = v$vcov
+    name_4_res = paste0 (v$grp[!grepl(":|Residual", v$grp)], collapse = ":")
+    names (vc)= v$grp
+    names(vc) [names(vc) == "Residual"] = name_4_res
+
+    # ICC2 --------------------------------------------
+    ## Total variance
+    denom = sum (vc)
+    ## Variance without what
+    numer = sum (vc[!grepl (what, names (vc))])
+    ## ICC
+    ICC2 = numer/ denom
+    
+    #ICC2k---------------------------------------------
+    ## Total variance with k repeats
+    denom_k = sum (vc[grepl (what, names (vc))]/ k) + sum (vc[!grepl (what, names (vc))])
+    ## ICC
+    ICC2k = numer/ denom_k
+    
+    return (icc = c("ICC2" = ICC2, "ICC2k" = ICC2k))
+    
+  }
+
+}
+
+```
+
+
+### Create ICC boot function
+
+```{r}
+
+icc_boot <- function (formula, data, m.mer, my_icc, B){
+  
+  ICCs = ICCboot = NULL  
+
+  ICCs = my_icc(m.mer)
+
+  ICCboot =list ( ICC2 = bootMer(m.mer, my_icc, nsim = B))
+  
+  calcBootCI=function(b,ind=1){
+    boot.ci(b,type="perc",index=ind)$percent[4:5]
+  }
+  
+  out = list (ICC2 = calcBootCI(ICCboot$ICC2,1),
+              ICC2k = calcBootCI(ICCboot$ICC2,2)) %>%
+    do.call (rbind, .)
+  
+  out=data.frame(ICCs[names (ICCs)],out)
+  colnames(out)=c("val","lower","upper")
+  
+  return (out)
+}
+
+```
+
+### Practice booting
+
+```{r}
+
+icc_reps <- icc_type (what = "reps", k = 10)
+
+icc_boot (formula = f2, 
+          m.mer = m1,
+          B = 10, 
+          my_icc = icc_reps)
+
+```
+
+### How many repetitions do I need to perform to get my ICC > 0.8
+
+```{r}
+
+doParallel::registerDoParallel(7)
+
+ntimes <- 10
+B = 500
+
+boot.list = foreach (n = 1:ntimes, .packages = c("tidyverse", "lme4", "boot")) %dopar%{
+  icc_reps <- icc_type (what = "reps", k = n)
+  
+  icc_boot (formula = f2, 
+          data = ppt.df.merge, 
+          B = 20, 
+          my_icc = icc_reps)
+}
+
+names (boot.list) <- 1:ntimes
+
+boot.df = bind_rows(boot.list, .id = "Reps") %>%
+  rownames_to_column(var = "ICC") %>%
+  mutate (ICC = ifelse (grepl ("ICC2k", ICC), "ICC2K", "ICC2"),
+          Reps = as.numeric (Reps))
+```
+
+### Plot boot results
+
+```{r}
+tiff("Plot4.tiff", width = 4, height = 4, units = 'in', res = 300, compression = 'none')
+
+ggplot (data = boot.df , aes (x = Reps, y = val)) +
+  geom_line (position=position_dodge(1)) +
+  geom_point(position=position_dodge(1)) + 
+  geom_errorbar(aes(ymin=lower, ymax=upper), width=.2,
+                 position=position_dodge(1)) +
+  facet_wrap(~ICC) + 
+  labs (y =  expression (paste("var ",Delta, "PPT (",N^2, ")")) ,
+         x = "Repetitions" ) + 
+  geom_hline(yintercept=0.8, linetype="dashed", 
+                color = "black", size=1) + 
+  theme_cowplot()
+
+dev.off()
+
+
+```
+
+# Method: Traditional ICC (taking the average of N repetitions) 
+
+```{r message=FALSE, warning=FALSE}
+icc.list.m1 = list()
+
+for (n in 1:10){
+  # average
+  icc.df.m1 = ppt.df %>%
+  spread (key = session, value = PPT) %>%
+  rename (sess1 = "1",
+          sess2 = "2") %>%
+  filter ( reps <= n) %>%
+  group_by(subj) %>%
+  summarize (sess1 = mean (sess1),
+             sess2 = mean (sess2)) %>%
+  ungroup () %>%
+  as.data.frame()
+  icc.list.m1 [[n]] = ICC (x = icc.df.m1[, -c(1)]) [[1]][c(2,5), c(1,2,7,8)]
+
+}
+
+icc.sf.ave = bind_rows(icc.list.m1 , .id = "Reps") %>%
+  select (Reps, type, everything ()) %>%
+  mutate (Reps = as.numeric (Reps))
+
+colnames (icc.sf.ave) [4:5] = c("lower", "upper")
+
+tiff("Plot3.tiff", width = 7, height = 4, units = 'in', res = 300, compression = 'none')
+
+ggplot (data = icc.sf.ave , aes (x = Reps, y = ICC)) +
+  geom_line (position=position_dodge(1)) +
+  geom_point(position=position_dodge(1)) + 
+  geom_errorbar(aes(ymin=lower, ymax=upper), width=.2,
+                 position=position_dodge(1)) +
+  facet_wrap( ~ type, ncol = 2) +
+  ylab ("ICC (Session)") +
+  xlab ("Repetitions") +
+  scale_colour_manual(values = c("red", "blue")) +
+  geom_hline(yintercept=0.8, linetype="dashed", 
+                color = "black", size=1) +
+  scale_x_continuous(breaks=seq(0,10,2)) +
+  theme_cowplot ()
+
+dev.off ()
+
+icc.sf %>%
+  filter (Reps ==1 | Reps == 10) %>%
+  mutate (ICC = round (ICC, 2),
+          lower = round (lower, 2),
+          upper = round (upper, 2))
+```
+
+# Save data
+
+```{r, eval = FALSE}
+save (DaveData, 
+      ppt.df, 
+      boot.list_sess1,
+      boot.list_sess2 , 
+      icc.list.m1, 
+      icc.list.m2, 
+      boot.list, 
+      file = "ICCdat.Rdata")
+
+
+```
