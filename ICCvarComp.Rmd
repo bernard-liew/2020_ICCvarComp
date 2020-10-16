@@ -222,14 +222,14 @@ icc_boot (formula = f2,
 doParallel::registerDoParallel(7)
 
 ntimes <- 10
-B = 500
+nboot = 500
 
 boot.list = foreach (n = 1:ntimes, .packages = c("tidyverse", "lme4", "boot")) %dopar%{
   icc_reps <- icc_type (what = "reps", k = n)
   
   icc_boot (formula = f2, 
           data = ppt.df.merge, 
-          B = 20, 
+          B = nboot, 
           my_icc = icc_reps)
 }
 
