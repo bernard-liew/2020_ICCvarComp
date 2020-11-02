@@ -82,16 +82,12 @@ dev.off ()
 
 # Method: Variance components approach
 
-## All factors crossed
-
-Some evidence this model is too complex.
+## Cross nested design
 
 ```{r}
-f1 = PPT ~ (1|subj) + (1|session) + (1|side) + (1|reps) +
-  (1|subj:session) + (1|subj:side) + (1|subj:reps) + (1|session:side) + (1|session:reps) + (1|side:reps) + 
-  (1|subj:session:side) + (1|subj:session:reps) + (1|subj:side:reps) + (1|session:side:reps) 
+f1 <- PPT ~ (1|subj) + (1|subj:session) + (1|subj:side) + (1|subj:session:side)
 
-m1 = lmer (f1, data = ppt.df)
+m1 <- lmer (f1, data = ppt.df)
 
 varcomp1 = as.data.frame (VarCorr(m1))
 varcomp1[,c(4,5)] <- round (varcomp1[,c(4,5)], 2)
@@ -103,31 +99,6 @@ varcomp1
 ```{r}
 g1 <- hemp::gstudy(m1)
 g1
-```
-
-
-## Merge side and session to become separate trials
-
-```{r}
-
-ppt.df.merge <- ppt.df %>%
-  unite ("trials", session, side, sep =  "_")
-
-f2 = PPT ~ (1|subj) + (1|trials) + (1|reps) + (1|subj:reps) + (1|trials:reps) + (1|subj:trials)
-m2 = lmer (f2, data = ppt.df.merge, REML = TRUE)
-
-varcomp2 = as.data.frame (VarCorr(m2))
-varcomp2[,c(4,5)] <- round (varcomp2[,c(4,5)], 2)
-varcomp2
-
-```
-
-## Gstudy
-
-```{r}
-g2 <- hemp::gstudy(m2)
-g2
-
 ```
 
 ## Get ICC from variance components with bootstrap to get confidence interval
@@ -147,7 +118,7 @@ icc_type = function (what, k) {
     
     v=as.data.frame(VarCorr(m))
     vc = v$vcov
-    name_4_res = paste0 (v$grp[!grepl(":|Residual", v$grp)], collapse = ":")
+    name_4_res = "reps"
     names (vc)= v$grp
     names(vc) [names(vc) == "Residual"] = name_4_res
 
@@ -178,7 +149,7 @@ icc_type = function (what, k) {
 
 ```{r}
 
-icc_boot <- function (formula, data, m.mer, my_icc, B){
+icc_boot <- function (m.mer, my_icc, B){
   
   ICCs = ICCboot = NULL  
 
@@ -208,8 +179,7 @@ icc_boot <- function (formula, data, m.mer, my_icc, B){
 
 icc_reps <- icc_type (what = "reps", k = 10)
 
-icc_boot (formula = f2, 
-          m.mer = m1,
+icc_boot (m.mer = m1,
           B = 10, 
           my_icc = icc_reps)
 
@@ -227,8 +197,7 @@ nboot = 500
 boot.list = foreach (n = 1:ntimes, .packages = c("tidyverse", "lme4", "boot")) %dopar%{
   icc_reps <- icc_type (what = "reps", k = n)
   
-  icc_boot (formula = f2, 
-          data = ppt.df.merge, 
+  icc_boot (m.mer = m1, 
           B = nboot, 
           my_icc = icc_reps)
 }
