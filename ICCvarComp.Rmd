@@ -92,12 +92,15 @@ m1 <- lmer (f1, data = ppt.df)
 varcomp1 = as.data.frame (VarCorr(m1))
 varcomp1[,c(4,5)] <- round (varcomp1[,c(4,5)], 2)
 varcomp1
+
+round (confint(m1, oldNames=FALSE)^2, 2)
 ```
 
 ## Gstudy
 
 ```{r}
 g1 <- hemp::gstudy(m1)
+g1$gstudy.out[,2] <- round (g1$gstudy.out[,2], 2)
 g1
 ```
 
@@ -116,27 +119,37 @@ icc_type = function (what, k) {
   
   function (m) {
     
-    v=as.data.frame(VarCorr(m))
-    vc = v$vcov
-    name_4_res = "reps"
-    names (vc)= v$grp
-    names(vc) [names(vc) == "Residual"] = name_4_res
+    what <- paste0(what, collapse = "|")
+    
+    v <- as.data.frame(VarCorr(m)) [c(1,4)]
+    v[nrow (v), 1] <- "reps"
+    n.mat <- matrix(nrow = nrow(v), ncol = length(k))
+    for (i in 1:length(k)) n.mat[grep(names(k)[i], v$grp), 
+                                i] <- k[i]
+    n.mat[nrow(n.mat), ] <- k
+    v$n <- apply(n.mat, 1, prod, na.rm = T)
+    v$vcov.n <- v$vcov/v$n
 
     # ICC2 --------------------------------------------
     ## Total variance
-    denom = sum (vc)
+    denom <- sum (v$vcov)
     ## Variance without what
-    numer = sum (vc[!grepl (what, names (vc))])
+    numer <- sum (v[!grepl (what, v$grp), "vcov"])
     ## ICC
-    ICC2 = numer/ denom
+    ICC2 <- numer/ denom
     
     #ICC2k---------------------------------------------
     ## Total variance with k repeats
-    denom_k = sum (vc[grepl (what, names (vc))]/ k) + sum (vc[!grepl (what, names (vc))])
-    ## ICC
-    ICC2k = numer/ denom_k
+    if (min(k) == 1) k <- NULL
     
-    return (icc = c("ICC2" = ICC2, "ICC2k" = ICC2k))
+    denom_k <- sum (v$vcov.n)
+    numer_k <- sum (v[!grepl (paste0(c (what, names (k)), collapse = "|"), v$grp), "vcov"])
+    ## ICC
+    ICC2k <- numer_k / denom_k
+    
+    icc = c("ICC2" = ICC2, "ICC2k" = ICC2k)
+    
+    return (icc)
     
   }
 
@@ -177,7 +190,7 @@ icc_boot <- function (m.mer, my_icc, B){
 
 ```{r}
 
-icc_reps <- icc_type (what = "reps", k = 10)
+icc_reps <- icc_type (what = "session", k = c ("side" = 2, "reps" = 5))
 
 icc_boot (m.mer = m1,
           B = 10, 
@@ -185,17 +198,40 @@ icc_boot (m.mer = m1,
 
 ```
 
-### How many repetitions do I need to perform to get my ICC > 0.8
+## ICC(session)
+
+```{r}
+
+icc_reps <- icc_type (what = "session", k = c ("side" = 1, "reps" = 1))
+
+icc_sess <- icc_boot (m.mer = m1,
+                      B = 1000, 
+                      my_icc = icc_reps)
+```
+
+## ICC(session, reps)
+
+```{r}
+
+icc_reps <- icc_type (what = c("session", "reps"), k = c ("side" = 1, "reps" = 1))
+
+icc_sess_rep <-icc_boot (m.mer = m1,
+                    B = 1000, 
+                    my_icc = icc_reps)
+```
+
+
+## ICCk(session, reps)
 
 ```{r}
 
 doParallel::registerDoParallel(7)
 
 ntimes <- 10
-nboot = 500
+nboot <- 1000
 
 boot.list = foreach (n = 1:ntimes, .packages = c("tidyverse", "lme4", "boot")) %dopar%{
-  icc_reps <- icc_type (what = "reps", k = n)
+  icc_reps <- icc_type (what = c("session", "reps"), k = c ("side" = 2, "reps" = n))
   
   icc_boot (m.mer = m1, 
           B = nboot, 
@@ -207,22 +243,23 @@ names (boot.list) <- 1:ntimes
 boot.df = bind_rows(boot.list, .id = "Reps") %>%
   rownames_to_column(var = "ICC") %>%
   mutate (ICC = ifelse (grepl ("ICC2k", ICC), "ICC2K", "ICC2"),
-          Reps = as.numeric (Reps))
+          Reps = as.numeric (Reps)) %>%
+  filter (ICC == "ICC2K" & Reps > 1)
 ```
 
 ### Plot boot results
 
 ```{r}
-tiff("Plot4.tiff", width = 4, height = 4, units = 'in', res = 300, compression = 'none')
+tiff("Plot3.tiff", width = 4, height = 4, units = 'in', res = 300, compression = 'none')
 
 ggplot (data = boot.df , aes (x = Reps, y = val)) +
   geom_line (position=position_dodge(1)) +
   geom_point(position=position_dodge(1)) + 
   geom_errorbar(aes(ymin=lower, ymax=upper), width=.2,
                  position=position_dodge(1)) +
-  facet_wrap(~ICC) + 
-  labs (y =  expression (paste("var ",Delta, "PPT (",N^2, ")")) ,
+  labs (y =  "ICC2k",
          x = "Repetitions" ) + 
+  scale_x_continuous(breaks=seq(2,10,2)) + 
   geom_hline(yintercept=0.8, linetype="dashed", 
                 color = "black", size=1) + 
   theme_cowplot()
@@ -232,68 +269,15 @@ dev.off()
 
 ```
 
-# Method: Traditional ICC (taking the average of N repetitions) 
-
-```{r message=FALSE, warning=FALSE}
-icc.list.m1 = list()
-
-for (n in 1:10){
-  # average
-  icc.df.m1 = ppt.df %>%
-  spread (key = session, value = PPT) %>%
-  rename (sess1 = "1",
-          sess2 = "2") %>%
-  filter ( reps <= n) %>%
-  group_by(subj) %>%
-  summarize (sess1 = mean (sess1),
-             sess2 = mean (sess2)) %>%
-  ungroup () %>%
-  as.data.frame()
-  icc.list.m1 [[n]] = ICC (x = icc.df.m1[, -c(1)]) [[1]][c(2,5), c(1,2,7,8)]
-
-}
-
-icc.sf.ave = bind_rows(icc.list.m1 , .id = "Reps") %>%
-  select (Reps, type, everything ()) %>%
-  mutate (Reps = as.numeric (Reps))
-
-colnames (icc.sf.ave) [4:5] = c("lower", "upper")
-
-tiff("Plot3.tiff", width = 7, height = 4, units = 'in', res = 300, compression = 'none')
-
-ggplot (data = icc.sf.ave , aes (x = Reps, y = ICC)) +
-  geom_line (position=position_dodge(1)) +
-  geom_point(position=position_dodge(1)) + 
-  geom_errorbar(aes(ymin=lower, ymax=upper), width=.2,
-                 position=position_dodge(1)) +
-  facet_wrap( ~ type, ncol = 2) +
-  ylab ("ICC (Session)") +
-  xlab ("Repetitions") +
-  scale_colour_manual(values = c("red", "blue")) +
-  geom_hline(yintercept=0.8, linetype="dashed", 
-                color = "black", size=1) +
-  scale_x_continuous(breaks=seq(0,10,2)) +
-  theme_cowplot ()
-
-dev.off ()
-
-icc.sf %>%
-  filter (Reps ==1 | Reps == 10) %>%
-  mutate (ICC = round (ICC, 2),
-          lower = round (lower, 2),
-          upper = round (upper, 2))
-```
-
 # Save data
 
 ```{r, eval = FALSE}
 save (DaveData, 
       ppt.df, 
-      boot.list_sess1,
-      boot.list_sess2 , 
-      icc.list.m1, 
-      icc.list.m2, 
+      icc_sess,
+      icc_sess_rep,
       boot.list, 
+      boot.df, 
       file = "ICCdat.Rdata")
 
 
